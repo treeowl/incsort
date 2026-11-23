@@ -22,7 +22,7 @@ import Data.Sequence.Internal
   )
 import qualified Data.Sequence as S
 import System.Random
-import Data.Sequence ((|>), index, splitAt)
+import Data.Sequence (index, splitAt)
 import Prelude hiding (splitAt)
 --import Debug.Trace
 import Control.Exception (assert)
@@ -47,12 +47,14 @@ instance Sized (Seq a) where
 -- Partition a sequence around a particular value, maintaining the ordering of
 -- equal values.
 partitionSeq :: Ord a => a -> Seq a -> StrictTriple (Seq a) (Seq a) (Seq a)
-partitionSeq pivot = foldl' go (TripleS S.empty S.empty S.empty)
+partitionSeq pivot input =
+  case foldr' go (TripleS [] [] []) input of
+    TripleS less same more -> TripleS (S.fromList less) (S.fromList same) (S.fromList more)
   where
-    go (TripleS less same more) a = case compare a pivot of
-      LT -> TripleS (less |> a) same more
-      EQ -> TripleS less (same |> a) more
-      GT -> TripleS less same (more |> a)
+    go a (TripleS less same more) = case compare a pivot of
+      LT -> TripleS (a : less) same more
+      EQ -> TripleS less (a : same) more
+      GT -> TripleS less same (a : more)
 
 incSort :: Ord a => StdGen -> Seq a -> Seq a
 incSort !_g (Seq EmptyT) = S.empty

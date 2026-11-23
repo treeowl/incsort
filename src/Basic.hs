@@ -31,18 +31,18 @@ import qualified Data.List as L
 import qualified Data.Foldable as F
 import GHC.Exts (inline)
 
--- A tree of sequences annotated by total length. The elements of each sequence are
--- less than or equal to those of following sequences.
---
--- TODO: Currently, once we know that a subsequence is sorted, we break it up into a
--- bunch of singletons. Another option might be to tag the sequences in the Parted
--- to indicate whether they're known to be sorted. This might help limit long-lived
--- clutter at the expense of more (hopefully short term) clutter. It might be beneficial
--- to combine division-by-sorting for small pieces with eager construction of small
--- nodes, to clear most of the little clutter bits quickly.
-type Parted a = FingerTree (Seq a)
-instance Sized (Seq a) where
-  size = length
+-- A tree of chunks annotated by total length. Every element in a chunk is
+-- less than or equal to every element in the following chunks.
+type Parted a = FingerTree (Chunk a)
+
+data Chunk a = Chunk !Sortedness !(Seq a)
+  deriving (Show)
+
+data Sortedness = Unsorted | Sorted
+  deriving (Show)
+
+instance Sized (Chunk a) where
+  size (Chunk _ s) = length s
 
 -- Partition a sequence around a particular value, maintaining the ordering of
 -- equal values.
@@ -59,9 +59,9 @@ partitionSeq pivot input =
 incSort :: Ord a => StdGen -> Seq a -> Seq a
 incSort !_g (Seq EmptyT) = S.empty
 incSort !_g s@(Seq (Single _)) = s
-incSort g s = Seq $ doSort (length s) 1 unpackSingleton g (Single s)
+incSort g s = Seq $ doSort (length s) 1 unpackSingleton g (Single (Chunk Unsorted s))
   where
-    unpackSingleton _g (Single (Seq (Single x))) = x
+    unpackSingleton _g (Single (Chunk _ (Seq (Single x)))) = x
     unpackSingleton _ _ = error "Parted is not a singleton at the leaf"
 
 doSort :: forall a b. Ord a => Int -> Int -> (StdGen -> Parted a -> b) -> StdGen -> Parted a -> FingerTree b
@@ -157,22 +157,14 @@ choosePivot g s
         (candindices, g') -> (L.sort (fmap (s `index`) candindices) !! 2) :*: g'
 
 infixr 5 <<|
-infixr 4 <<<|
 infixl 5 |>>
-infixl 4 |>>>
-(<<|) :: Seq a -> Parted a -> Parted a
-Seq EmptyT <<| p = p
+(<<|) :: Chunk a -> Parted a -> Parted a
+Chunk _ (Seq EmptyT) <<| p = p
 s <<| p = s `consTree` p
 
-(|>>) :: Parted a -> Seq a -> Parted a
-p |>> Seq EmptyT = p
+(|>>) :: Parted a -> Chunk a -> Parted a
+p |>> Chunk _ (Seq EmptyT) = p
 p |>> s = p `snocTree` s
-
-(<<<|) :: Seq a -> Parted a -> Parted a
-s <<<| p = foldr' (\a part -> S.singleton a `consTree` part) p s
-
-(|>>>) :: Parted a -> Seq a -> Parted a
-p |>>> s = foldl' (\part a -> part `snocTree` S.singleton a) p s
 
 divideParted :: Ord a => StdGen -> Int -> Parted a -> StrictTriple (Parted a) (Parted a) StdGen
 divideParted g !_i EmptyT = TripleS EmptyT EmptyT g
@@ -190,29 +182,28 @@ divideParted g i p = assert (i >= 0) $
           good (TripleS l r _) = size l == i && i + size r == size p
         in assert (good res) res
 
-instance (Show a, b ~ Seq a) => Show (FingerTree b) where
+instance (Show a, b ~ Chunk a) => Show (FingerTree b) where
   -- This mapping is completely illegitimate, but it's okay because the Show instance
   -- doesn't care about size annotations.
   showsPrec i t = showsPrec i (Seq (fmap Elem t))
 
 
-divideParted' :: Ord a => StdGen -> Int -> Parted a -> Seq a -> Parted a -> StrictTriple (Parted a) (Parted a) StdGen
-divideParted' g i before during@(Seq (Single _)) after
-  | i == 0 = TripleS before (during `consTree` after) g
-  | otherwise = TripleS (before `snocTree` during) after g
-
-divideParted' g i before during after =
-  case choosePivot g during of
-    pivot :*: g' -> case partitionSeq pivot during of
-      TripleS less same more
-        | i < length less
-        -> divideParted' g' i before less (same <<<| more <<| after)
-        | let i' = i - length less
-        , i' < length same
-        -> case splitAt i' same of
-             (boo, yah) -> TripleS (before |>> less |>>> boo) (yah <<<| more <<| after) g'
-        | let i' = i - length less - length same
-        -> divideParted' g' i' (before |>> less |>>> same) more after
+divideParted' :: Ord a => StdGen -> Int -> Parted a -> Chunk a -> Parted a -> StrictTriple (Parted a) (Parted a) StdGen
+divideParted' g 0 before during after = TripleS before (during <<| after) g
+divideParted' g i before during@(Chunk sortedness s) after
+  | i == length s = TripleS (before |>> during) after g
+  | Sorted <- sortedness = case splitAt i s of
+      (left, right) -> TripleS (before |>> Chunk Sorted left) (Chunk Sorted right <<| after) g
+  | otherwise = case choosePivot g s of
+      pivot :*: g' -> case partitionSeq pivot s of
+        TripleS less same more
+          | i < length less
+          -> divideParted' g' i before (Chunk Unsorted less) (Chunk Sorted same <<| Chunk Unsorted more <<| after)
+          | let i' = i - length less
+          , i' < length same
+          -> divideParted' g' i' (before |>> Chunk Unsorted less) (Chunk Sorted same) (Chunk Unsorted more <<| after)
+          | let i' = i - length less - length same
+          -> divideParted' g' i' (before |>> Chunk Unsorted less |>> Chunk Sorted same) (Chunk Unsorted more) after
 
 
 -- CAUTION: Split should only be used for *data* like Node or Seq, not for
@@ -223,7 +214,7 @@ data StrictPair a b = !a :*: !b
 
 infixr 1 :*:
 
-deriving instance (Show a, b ~ Seq a) => Show (Split b)
+deriving instance (Show a, b ~ Chunk a) => Show (Split b)
 
 data StrictTriple a b c = TripleS !a !b !c
   deriving (Show)
@@ -261,7 +252,7 @@ instance Valid a => Valid (Digit a) where
 -- WARNING: This function forces the item being split around. Normally, it should
 -- not be used to split around an Elem.
 {-# SPECIALIZE splitTreeN :: Int -> FingerTree (Node a) -> Split (Node a) #-}
-{-# SPECIALIZE splitTreeN :: Int -> FingerTree (Seq a) -> Split (Seq a) #-}
+{-# SPECIALIZE splitTreeN :: Int -> FingerTree (Chunk a) -> Split (Chunk a) #-}
 splitTreeN :: Sized a => Int -> FingerTree a -> Split a
 splitTreeN !_i EmptyT = error "splitTreeN of empty tree"
 splitTreeN _i (Single x) = Split EmptyT x EmptyT

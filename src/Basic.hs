@@ -68,7 +68,7 @@ doSort :: forall a b. Ord a => Int -> Int -> (StdGen -> Parted a -> b) -> StdGen
 -- This is awful. It would be nicer to use some sort of appropriate functor, I imagine.
 doSort n !mSize m = case n of
     0 -> emptyTree
-    1 -> \ !g !p -> Single (m g p)
+    1 -> \g p -> Single (m g p)
     2 -> deepA 1 one emptyTree 1 one
     3 -> deepA 2 two emptyTree 1 one
     4 -> deepA 2 two emptyTree 2 two
@@ -79,24 +79,19 @@ doSort n !mSize m = case n of
            (q,1) -> deepA 2 two (doSort (q - 1) mSize' n3) 2 two
            (q,_) -> deepA 3 three (doSort (q - 1) mSize' n3) 2 two
       where !mSize' = 3 * mSize
-            n3 g p = Node3 mSize' lres mres rres
+            n3 g p = Node3 mSize' (m g1 left) (m g2 mid) (m g3 right)
               where
-                -- I don't think we even inspect a Node without going on to inspect one of
-                -- its children, so we can be strict here. We *could* produce the first child
-                -- before separating the second from the third. Maybe that would help with
-                -- incremental consumption from left to right?
-                !(lres, mres, rres) =
+                (g1, g2, g3, left, mid, right) =
                   case divideParted g mSize p of { TripleS left rest g' ->
                   case divideParted g' mSize rest of { TripleS mid right g'' ->
                   case splitGen g'' of { (g1, g''') ->
                   case splitGen g''' of { (g2, g3) ->
-                     (m g1 left, m g2 mid, m g3 right) }}}}
+                     (g1, g2, g3, left, mid, right) }}}}
   where
     deepA :: Int -> (StdGen -> Parted a -> Digit b) -> (StdGen -> Parted a -> FingerTree (Node b)) -> Int -> (StdGen -> Parted a -> Digit b) -> StdGen -> Parted a -> FingerTree b
-    deepA prl prg mg sfl sfg !g p =
-      case deepSplitty prl sfl g p of {(g1, g2, g3, left, mid, right) ->
-          Deep (n * mSize) (prg g1 left) (mg g2 mid) (sfg g3 right)
-          }
+    deepA prl prg mg sfl sfg g p =
+      let (g1, g2, g3, left, mid, right) = deepSplitty prl sfl g p
+      in Deep (n * mSize) (prg g1 left) (mg g2 mid) (sfg g3 right)
 
     -- If we inline this into deepA (which would be a much more natural way to
     -- write it), then deepA doesn't inline, which is mildly unfortunate.
@@ -110,31 +105,29 @@ doSort n !mSize m = case n of
       }}}}
 
     one :: StdGen -> Parted a -> Digit b
-    one !g !p = One (m g p)
+    one g p = One (m g p)
 
-    -- Note: We want to be able to produce the left and right Digits without having to
-    -- produce the elements/nodes within them. Specifically, we shouldn't have to touch
-    -- the left side of the constructed spine to inspect the right, and vice versa.
-    
+    -- Apply the child builders outside the lazy split binding. This lets lookup
+    -- read a child's cached size without forcing its input partition.
     two :: StdGen -> Parted a -> Digit b
-    two !g !p = Two lres rres
+    two g p = Two (m g1 p1) (m g2 p2)
       where
-        (lres, rres) =
+        (g1, g2, p1, p2) =
           case divideParted g mSize p of { (TripleS p1 p2 g') ->
           case splitGen g' of { (g1, g2) ->
-            (m g1 p1, m g2 p2) }}
+            (g1, g2, p1, p2) }}
 
     three :: StdGen -> Parted a -> Digit b
-    three !g !p = Three lres mres rres
+    three g p = Three (m g1 p1) (m g2 p2) (m g3 p3)
       where
-        (lres, mres, rres) =
+        (g1, g2, g3, p1, p2, p3) =
           case divideParted g mSize p of { TripleS p1 p' g' ->
           case divideParted g' mSize p' of { TripleS p2 p3 g'' ->
           case splitGen g'' of { (g1, g''') ->
           case splitGen g''' of { (g2, g3) ->
-            (m g1 p1, m g2 p2, m g3 p3) }}}}
+            (g1, g2, g3, p1, p2, p3) }}}}
 
-    emptyTree !_g !_p = EmptyT
+    emptyTree _g _p = EmptyT
 
 
 -- TODO: choose sample size cutoffs much more carefully. I suspect we'll want

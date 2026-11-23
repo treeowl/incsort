@@ -187,6 +187,8 @@ divideParted' g i before during@(Chunk sortedness s) after
   | i == length s = TripleS (before |>> during) after g
   | Sorted <- sortedness = case splitAt i s of
       (left, right) -> TripleS (before |>> Chunk Sorted left) (Chunk Sorted right <<| after) g
+  | length s >= 1024 = case sampleBuckets g s of
+      buckets :*: g' -> divideBuckets g' i before buckets after
   | otherwise = case choosePivot g s of
       pivot :*: g' -> case partitionSeq pivot s of
         TripleS less same more
@@ -198,6 +200,50 @@ divideParted' g i before during@(Chunk sortedness s) after
           | let i' = i - length less - length same
           -> divideParted' g' i' (before |>> Chunk Unsorted less |>> Chunk Sorted same) (Chunk Unsorted more) after
 
+
+-- Take three splitters at the quartiles of a 15-element sample.
+sampleBuckets :: Ord a => StdGen -> Seq a -> StrictPair [Chunk a] StdGen
+sampleBuckets g s =
+  case uniformListR 15 (0, length s - 1) g of
+    (indices, g') ->
+      let sample = L.sort (fmap (s `index`) indices)
+      in partitionFour (sample L.!! 3) (sample L.!! 7) (sample L.!! 11) s :*: g'
+
+-- Four ranges and a separate bucket for each splitter's equal keys.
+data BucketLists a = BucketLists ![a] ![a] ![a] ![a] ![a] ![a] ![a]
+
+partitionFour :: Ord a => a -> a -> a -> Seq a -> [Chunk a]
+partitionFour low mid high s =
+  case foldr' go (BucketLists [] [] [] [] [] [] []) s of
+    BucketLists belowLow equalLow lowToMid equalMid midToHigh equalHigh aboveHigh ->
+      [ Chunk Unsorted (S.fromList belowLow)
+      , Chunk Sorted   (S.fromList equalLow)
+      , Chunk Unsorted (S.fromList lowToMid)
+      , Chunk Sorted   (S.fromList equalMid)
+      , Chunk Unsorted (S.fromList midToHigh)
+      , Chunk Sorted   (S.fromList equalHigh)
+      , Chunk Unsorted (S.fromList aboveHigh)
+      ]
+  where
+    go x (BucketLists belowLow equalLow lowToMid equalMid midToHigh equalHigh aboveHigh) =
+      case compare x mid of
+        LT -> case compare x low of
+          LT -> BucketLists (x : belowLow) equalLow lowToMid equalMid midToHigh equalHigh aboveHigh
+          EQ -> BucketLists belowLow (x : equalLow) lowToMid equalMid midToHigh equalHigh aboveHigh
+          GT -> BucketLists belowLow equalLow (x : lowToMid) equalMid midToHigh equalHigh aboveHigh
+        EQ -> BucketLists belowLow equalLow lowToMid (x : equalMid) midToHigh equalHigh aboveHigh
+        GT -> case compare x high of
+          LT -> BucketLists belowLow equalLow lowToMid equalMid (x : midToHigh) equalHigh aboveHigh
+          EQ -> BucketLists belowLow equalLow lowToMid equalMid midToHigh (x : equalHigh) aboveHigh
+          GT -> BucketLists belowLow equalLow lowToMid equalMid midToHigh equalHigh (x : aboveHigh)
+
+-- Refine the bucket containing the cut and keep the others for later cuts.
+divideBuckets :: Ord a => StdGen -> Int -> Parted a -> [Chunk a] -> Parted a -> StrictTriple (Parted a) (Parted a) StdGen
+divideBuckets g 0 before buckets after = TripleS before (foldr (<<|) after buckets) g
+divideBuckets g i before (bucket : buckets) after
+  | i < size bucket = divideParted' g i before bucket (foldr (<<|) after buckets)
+  | otherwise = divideBuckets g (i - size bucket) (before |>> bucket) buckets after
+divideBuckets _ _ _ [] _ = error "divideBuckets: rank outside the chunk"
 
 -- CAUTION: Split should only be used for *data* like Node or Seq, not for
 -- Elem. Otherwise, it will force things illegitimately.

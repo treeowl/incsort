@@ -35,14 +35,15 @@ import GHC.Exts (inline)
 -- less than or equal to every element in the following chunks.
 type Parted a = FingerTree (Chunk a)
 
-data Chunk a = Chunk !Sortedness !(Seq a)
+data Chunk a = ChunkSorted !(Seq a) | ChunkUnsorted !(Seq a)
   deriving (Show)
 
-data Sortedness = Unsorted | Sorted
-  deriving (Show)
+--data Sortedness = Unsorted | Sorted
+--  deriving (Show)
 
 instance Sized (Chunk a) where
-  size (Chunk _ s) = length s
+  size (ChunkSorted s) = length s
+  size (ChunkUnsorted s) = length s
 
 -- Partition a sequence around a particular value, maintaining the ordering of
 -- equal values.
@@ -56,12 +57,15 @@ partitionSeq pivot input =
       EQ -> TripleS less (a : same) more
       GT -> TripleS less same (a : more)
 
+-- TODO: I think we want to do something special with the Nodes whose children are
+-- Elems so we don't end up allocating thunks to unpack singletons.
 incSort :: Ord a => StdGen -> Seq a -> Seq a
 incSort !_g (Seq EmptyT) = S.empty
 incSort !_g s@(Seq (Single _)) = s
-incSort g s = Seq $ doSort (length s) 1 unpackSingleton g (Single (Chunk Unsorted s))
+incSort g s = Seq $ doSort (length s) 1 unpackSingleton g (Single (ChunkUnsorted s))
   where
-    unpackSingleton _g (Single (Chunk _ (Seq (Single x)))) = x
+    unpackSingleton _g (Single (ChunkSorted (Seq (Single x)))) = x
+    unpackSingleton _g (Single (ChunkUnsorted (Seq (Single x)))) = x
     unpackSingleton _ _ = error "Parted is not a singleton at the leaf"
 
 doSort :: forall a b. Ord a => Int -> Int -> (StdGen -> Parted a -> b) -> StdGen -> Parted a -> FingerTree b
@@ -105,12 +109,12 @@ doSort n !mSize m = case n of
       }}}}
 
     one :: StdGen -> Parted a -> Digit b
-    one g p = One (m g p)
+    one !g p = One (m g p)
 
     -- Apply the child builders outside the lazy split binding. This lets lookup
     -- read a child's cached size without forcing its input partition.
     two :: StdGen -> Parted a -> Digit b
-    two g p = Two (m g1 p1) (m g2 p2)
+    two !g p = Two (m g1 p1) (m g2 p2)
       where
         (g1, g2, p1, p2) =
           case divideParted g mSize p of { (TripleS p1 p2 g') ->
@@ -118,7 +122,7 @@ doSort n !mSize m = case n of
             (g1, g2, p1, p2) }}
 
     three :: StdGen -> Parted a -> Digit b
-    three g p = Three (m g1 p1) (m g2 p2) (m g3 p3)
+    three !g p = Three (m g1 p1) (m g2 p2) (m g3 p3)
       where
         (g1, g2, g3, p1, p2, p3) =
           case divideParted g mSize p of { TripleS p1 p' g' ->
@@ -152,11 +156,11 @@ choosePivot g s
 infixr 5 <<|
 infixl 5 |>>
 (<<|) :: Chunk a -> Parted a -> Parted a
-Chunk _ (Seq EmptyT) <<| p = p
+ChunkUnsorted (Seq EmptyT) <<| p = p
 s <<| p = s `consTree` p
 
 (|>>) :: Parted a -> Chunk a -> Parted a
-p |>> Chunk _ (Seq EmptyT) = p
+p |>> ChunkUnsorted (Seq EmptyT) = p
 p |>> s = p `snocTree` s
 
 divideParted :: Ord a => StdGen -> Int -> Parted a -> StrictTriple (Parted a) (Parted a) StdGen
@@ -183,22 +187,24 @@ instance (Show a, b ~ Chunk a) => Show (FingerTree b) where
 
 divideParted' :: Ord a => StdGen -> Int -> Parted a -> Chunk a -> Parted a -> StrictTriple (Parted a) (Parted a) StdGen
 divideParted' g 0 before during after = TripleS before (during <<| after) g
-divideParted' g i before during@(Chunk sortedness s) after
-  | i == length s = TripleS (before |>> during) after g
-  | Sorted <- sortedness = case splitAt i s of
-      (left, right) -> TripleS (before |>> Chunk Sorted left) (Chunk Sorted right <<| after) g
+divideParted' g i before during after
+  | i == size during = TripleS (before |>> during) after g
+divideParted' g i before (ChunkSorted s) after
+  = case splitAt i s of
+      (left, right) -> TripleS (before |>> ChunkSorted left) (ChunkSorted right <<| after) g
+divideParted' g i before (ChunkUnsorted s) after
   | length s >= 1024 = case sampleBuckets g s of
       buckets :*: g' -> divideBuckets g' i before buckets after
   | otherwise = case choosePivot g s of
       pivot :*: g' -> case partitionSeq pivot s of
         TripleS less same more
           | i < length less
-          -> divideParted' g' i before (Chunk Unsorted less) (Chunk Sorted same <<| Chunk Unsorted more <<| after)
+          -> divideParted' g' i before (ChunkUnsorted less) (ChunkSorted same <<| ChunkUnsorted more <<| after)
           | let i' = i - length less
           , i' < length same
-          -> divideParted' g' i' (before |>> Chunk Unsorted less) (Chunk Sorted same) (Chunk Unsorted more <<| after)
+          -> divideParted' g' i' (before |>> ChunkUnsorted less) (ChunkSorted same) (ChunkUnsorted more <<| after)
           | let i' = i - length less - length same
-          -> divideParted' g' i' (before |>> Chunk Unsorted less |>> Chunk Sorted same) (Chunk Unsorted more) after
+          -> divideParted' g' i' (before |>> ChunkUnsorted less |>> ChunkSorted same) (ChunkUnsorted more) after
 
 
 -- Take three splitters at the quartiles of a 15-element sample.
@@ -212,17 +218,29 @@ sampleBuckets g s =
 -- Four ranges and a separate bucket for each splitter's equal keys.
 data BucketLists a = BucketLists ![a] ![a] ![a] ![a] ![a] ![a] ![a]
 
+-- TODO: This AI-generated partitioning code isn't very nice, and I'd very much
+-- like to be rid of it. Some ideas:
+--
+-- 1. Use arrays instead of lists, and don't convert them to sequences.
+--
+-- 2. Use lists as here, but don't convert them to sequences; the issue with
+--    that approach is that is suggests swapping directions back and forth by level,
+--    and is awkward if we want to use a "deserialization" approach near the leaves.
+--
+-- 3. Switch from a giant tuple to an array-based binary search tree thingy, with
+--    the buckets represented by an array of (doubling) arrays.
+
 partitionFour :: Ord a => a -> a -> a -> Seq a -> [Chunk a]
 partitionFour low mid high s =
   case foldr' go (BucketLists [] [] [] [] [] [] []) s of
     BucketLists belowLow equalLow lowToMid equalMid midToHigh equalHigh aboveHigh ->
-      [ Chunk Unsorted (S.fromList belowLow)
-      , Chunk Sorted   (S.fromList equalLow)
-      , Chunk Unsorted (S.fromList lowToMid)
-      , Chunk Sorted   (S.fromList equalMid)
-      , Chunk Unsorted (S.fromList midToHigh)
-      , Chunk Sorted   (S.fromList equalHigh)
-      , Chunk Unsorted (S.fromList aboveHigh)
+      [ ChunkUnsorted (S.fromList belowLow)
+      , ChunkSorted   (S.fromList equalLow)
+      , ChunkUnsorted (S.fromList lowToMid)
+      , ChunkSorted   (S.fromList equalMid)
+      , ChunkUnsorted (S.fromList midToHigh)
+      , ChunkSorted   (S.fromList equalHigh)
+      , ChunkUnsorted (S.fromList aboveHigh)
       ]
   where
     go x (BucketLists belowLow equalLow lowToMid equalMid midToHigh equalHigh aboveHigh) =

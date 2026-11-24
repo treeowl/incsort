@@ -10,6 +10,6 @@ main :: IO ()
 main = do
   input <- newStdGen >>= \gen -> pure $ fromList $ fst $ uniformList @Int (10 ^ (6 :: Int)) gen
   sorted <- newStdGen >>= \gen -> pure $ incSort gen input
-  -- print $ sorted `index` (5 * 10 ^ (5 :: Int))
-  print $ sum sorted
+  print $ sorted `index` (5 * 10 ^ (5 :: Int))
+--  print $ sum sorted
 --  print $ sorted == S.sort input

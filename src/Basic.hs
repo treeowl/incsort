@@ -80,7 +80,7 @@ doSort :: forall a b. Ord a => Depth a b -> Int -> Int -> StdGen -> Parted a -> 
 -- This is awful. It would be nicer to use some sort of appropriate functor, I imagine.
 doSort !depth n !mSize = case n of
     0 -> emptyTree
-    1 -> \g p -> Single (buildItem p depth mSize g p)
+    1 -> \g p -> Single (buildItem depth mSize g p)
     2 -> deepA 1 one emptyTree 1 one
     3 -> deepA 2 two emptyTree 1 one
     4 -> deepA 2 two emptyTree 2 two
@@ -112,12 +112,12 @@ doSort !depth n !mSize = case n of
       }}
 
     one :: StdGen -> Parted a -> Digit b
-    one !g p = One (buildItem p depth mSize g p)
+    one !g !p = One (buildItem depth mSize g p)
 
     -- Apply the child builders outside the lazy split binding. This lets lookup
     -- read a child's cached size without forcing its input partition.
     two :: StdGen -> Parted a -> Digit b
-    two !g p = Two (buildItem p depth mSize g1 p1) (buildItem p depth mSize g2 p2)
+    two !g !p = Two (buildItem depth mSize g1 p1) (buildItem depth mSize g2 p2)
       where
         !(g1, g') = splitGen g
         !(g2, g'') = splitGen g'
@@ -126,8 +126,8 @@ doSort !depth n !mSize = case n of
             (TripleS p1' p2' _) -> (p1', p2')
 
     three :: StdGen -> Parted a -> Digit b
-    three !g p =
-      Three (buildItem p depth mSize g1 p1) (buildItem p depth mSize g2 p2) (buildItem p depth mSize g3 p3)
+    three !g !p =
+      Three (buildItem depth mSize g1 p1) (buildItem depth mSize g2 p2) (buildItem depth mSize g3 p3)
       where
         !(g1, g') = splitGen g
         !(g2, g'') = splitGen g'
@@ -139,23 +139,15 @@ doSort !depth n !mSize = case n of
 
     emptyTree _g _p = EmptyT
 
-buildItem :: Ord a => x -> Depth a b -> Int -> StdGen -> Parted a -> b
-buildItem _c Zero !_ !_ (Single (ChunkSorted (Seq (Single x)))) = x
-buildItem _c Zero !_ !_ (Single (ChunkUnsorted (Seq (Single x)))) = x
-buildItem _c Zero !_ !_ !_ = error "Parted is not a singleton at the leaf"
-buildItem c (Succ depth) mSize g p =
+buildItem :: Ord a => Depth a b -> Int -> StdGen -> Parted a -> b
+buildItem Zero !_ !_ (Single (ChunkSorted (Seq (Single x)))) = x
+buildItem Zero !_ !_ (Single (ChunkUnsorted (Seq (Single x)))) = x
+buildItem Zero !_ !_ !_ = error "Parted is not a singleton at the leaf"
+buildItem (Succ depth) mSize g !p =
   case splitGen g of { (g1, g') ->
   case splitGen g' of { (g2, g'') ->
   case splitGen g'' of { (g3, g''') ->
-    -- My purpose of `c` here is to avoid building up *too* many thunks. If I'm
-    -- reasoning about this correctly, omitting the weird `c` argument means that 
-    -- none of the `divide` steps actually occurs until someone inspects an
-    -- element of the sequence. We want to be very lazy, but I think that's going
-    -- too far. My hope and expectation is that by passing `p` down as `c` to the
-    -- next level, and forcing it when that level's children are forced, we can
-    -- limit the thunk chains without paying too much for immediate indexing.
-    --
-    Node3 (3 * mSize) (c `seq` buildItem p depth mSize' g1 left) (c `seq` buildItem p depth mSize' g2 mid) (c `seq` buildItem p depth mSize' g3 right)
+    Node3 (3 * mSize) (buildItem depth mSize' g1 left) (buildItem depth mSize' g2 mid) (buildItem depth mSize' g3 right)
       where
         !mSize' = mSize `quot` 3
         (left, mid, right) =

@@ -11,7 +11,8 @@
 {-# language TypeOperators #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
-{-# OPTIONS_GHC -ddump-simpl #-}
+
+{- OPTIONS_GHC -ddump-simpl #-}
 module Basic (incSort) where
 
 import Data.Sequence.Internal
@@ -90,19 +91,6 @@ doSort !depth n !mSize = case n of
            (q,1) -> deepA 2 two (doSort (Succ depth) (q - 1) mSize') 2 two
            (q,_) -> deepA 3 three (doSort (Succ depth) (q - 1) mSize') 2 two
       where !mSize' = 3 * mSize
-      {-
-            n3 !g p =
-              case splitGen g of { (g1, g') ->
-              case splitGen g' of { (g2, g'') ->
-              case splitGen g'' of { (g3, g''') ->
-                Node3 mSize' (buildItem depth g1 left) (buildItem depth g2 mid) (buildItem depth g3 right)
-                  where
-                    (left, mid, right) =
-
-                      case divideParted g''' mSize p of { TripleS left rest g'''' ->
-                      case divideParted g'''' mSize rest of { TripleS mid right _ ->
-                         (left, mid, right) }}}}}
-                         -}
   where
     deepA :: Int -> (StdGen -> Parted a -> Digit b) -> (StdGen -> Parted a -> FingerTree (Node b)) -> Int -> (StdGen -> Parted a -> Digit b) -> StdGen -> Parted a -> FingerTree b
     deepA prl prg mg sfl sfg g p =
@@ -124,12 +112,12 @@ doSort !depth n !mSize = case n of
       }}
 
     one :: StdGen -> Parted a -> Digit b
-    one !g p = One (buildItem depth mSize g p)
+    one !g !p = One (buildItem depth mSize g p)
 
     -- Apply the child builders outside the lazy split binding. This lets lookup
     -- read a child's cached size without forcing its input partition.
     two :: StdGen -> Parted a -> Digit b
-    two !g p = Two (buildItem depth mSize g1 p1) (buildItem depth mSize g2 p2)
+    two !g !p = Two (buildItem depth mSize g1 p1) (buildItem depth mSize g2 p2)
       where
         !(g1, g') = splitGen g
         !(g2, g'') = splitGen g'
@@ -138,7 +126,7 @@ doSort !depth n !mSize = case n of
             (TripleS p1' p2' _) -> (p1', p2')
 
     three :: StdGen -> Parted a -> Digit b
-    three !g p =
+    three !g !p =
       Three (buildItem depth mSize g1 p1) (buildItem depth mSize g2 p2) (buildItem depth mSize g3 p3)
       where
         !(g1, g') = splitGen g
@@ -155,15 +143,13 @@ buildItem :: Ord a => Depth a b -> Int -> StdGen -> Parted a -> b
 buildItem Zero !_ !_ (Single (ChunkSorted (Seq (Single x)))) = x
 buildItem Zero !_ !_ (Single (ChunkUnsorted (Seq (Single x)))) = x
 buildItem Zero !_ !_ !_ = error "Parted is not a singleton at the leaf"
-buildItem (Succ depth) mSize g p =
+buildItem (Succ depth) mSize g !p =
   case splitGen g of { (g1, g') ->
   case splitGen g' of { (g2, g'') ->
   case splitGen g'' of { (g3, g''') ->
     Node3 (3 * mSize) (buildItem depth mSize' g1 left) (buildItem depth mSize' g2 mid) (buildItem depth mSize' g3 right)
       where
         !mSize' = mSize `quot` 3
---        unpackSingleton _g (Single (Chunk _ (Seq (Single x)))) = x
---        unpackSingleton _ _ = error "Parted is not a singleton at the leaf"
         (left, mid, right) =
           case divideParted g''' mSize' p of { TripleS left' rest g'''' ->
           case divideParted g'''' mSize' rest of { TripleS mid' right' _ ->

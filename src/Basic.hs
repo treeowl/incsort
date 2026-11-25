@@ -1,6 +1,7 @@
 {-# language BangPatterns #-}
 {-# language DeriveFunctor #-}
 {-# language ScopedTypeVariables #-}
+{-# LANGUAGE GADTs #-}
 
 -- for debugging
 {-# language StandaloneDeriving #-}
@@ -9,6 +10,7 @@
 {-# language UndecidableInstances #-}
 {-# language TypeOperators #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
+
 {- OPTIONS_GHC -ddump-simpl #-}
 module Basic (incSort) where
 
@@ -62,15 +64,20 @@ partitionSeq pivot input =
 incSort :: Ord a => StdGen -> Seq a -> Seq a
 incSort !_g (Seq EmptyT) = S.empty
 incSort !_g s@(Seq (Single _)) = s
-incSort g s = Seq $ doSort (length s) 1 unpackSingleton g (Single (ChunkUnsorted s))
+incSort g s = assert (valid res) res
   where
+    res = Seq $ doSort Zero (length s) 1 unpackSingleton g (Single (ChunkUnsorted s))
     unpackSingleton _g (Single (ChunkSorted (Seq (Single x)))) = x
     unpackSingleton _g (Single (ChunkUnsorted (Seq (Single x)))) = x
     unpackSingleton _ _ = error "Parted is not a singleton at the leaf"
 
-doSort :: forall a b. Ord a => Int -> Int -> (StdGen -> Parted a -> b) -> StdGen -> Parted a -> FingerTree b
+data Depth a b where
+  Zero :: Depth a (Elem a)
+  Succ :: !(Depth a b) -> Depth a (Node b)
+
+doSort :: forall a b. Ord a => Depth a b -> Int -> Int -> (StdGen -> Parted a -> b) -> StdGen -> Parted a -> FingerTree b
 -- This is awful. It would be nicer to use some sort of appropriate functor, I imagine.
-doSort n !mSize m = case n of
+doSort !depth n !mSize m = case n of
     0 -> emptyTree
     1 -> \g p -> Single (m g p)
     2 -> deepA 1 one emptyTree 1 one
@@ -79,18 +86,20 @@ doSort n !mSize m = case n of
     5 -> deepA 3 three emptyTree 2 two
     6 -> deepA 3 three emptyTree 3 three
     _ -> case n `quotRem` 3 of
-           (q,0) -> deepA 3 three (doSort (q - 2) mSize' n3) 3 three
-           (q,1) -> deepA 2 two (doSort (q - 1) mSize' n3) 2 two
-           (q,_) -> deepA 3 three (doSort (q - 1) mSize' n3) 2 two
+           (q,0) -> deepA 3 three (doSort (Succ depth) (q - 2) mSize' n3) 3 three
+           (q,1) -> deepA 2 two (doSort (Succ depth) (q - 1) mSize' n3) 2 two
+           (q,_) -> deepA 3 three (doSort (Succ depth) (q - 1) mSize' n3) 2 two
       where !mSize' = 3 * mSize
-            n3 g p = Node3 mSize' (m g1 left) (m g2 mid) (m g3 right)
-              where
-                (g1, g2, g3, left, mid, right) =
-                  case divideParted g mSize p of { TripleS left rest g' ->
-                  case divideParted g' mSize rest of { TripleS mid right g'' ->
-                  case splitGen g'' of { (g1, g''') ->
-                  case splitGen g''' of { (g2, g3) ->
-                     (g1, g2, g3, left, mid, right) }}}}
+            n3 !g p =
+              case splitGen g of { (g1, g') ->
+              case splitGen g' of { (g2, g'') ->
+              case splitGen g'' of { (g3, g''') ->
+                Node3 mSize' (m g1 left) (m g2 mid) (m g3 right)
+                  where
+                    (left, mid, right) =
+                      case divideParted g''' mSize p of { TripleS left rest g'''' ->
+                      case divideParted g'''' mSize rest of { TripleS mid right _ ->
+                         (left, mid, right) }}}}}
   where
     deepA :: Int -> (StdGen -> Parted a -> Digit b) -> (StdGen -> Parted a -> FingerTree (Node b)) -> Int -> (StdGen -> Parted a -> Digit b) -> StdGen -> Parted a -> FingerTree b
     deepA prl prg mg sfl sfg g p =
@@ -132,6 +141,24 @@ doSort n !mSize m = case n of
             (g1, g2, g3, p1, p2, p3) }}}}
 
     emptyTree _g _p = EmptyT
+
+buildItem :: Ord a => Depth a b -> Int -> StdGen -> Parted a -> b
+buildItem Zero !_ !_ (Single (ChunkSorted (Seq (Single x)))) = x
+buildItem Zero !_ !_ (Single (ChunkUnsorted (Seq (Single x)))) = x
+buildItem Zero !_ !_ !_ = error "Parted is not a singleton at the leaf"
+buildItem (Succ depth) mSize g p =
+  case splitGen g of { (g1, g') ->
+  case splitGen g' of { (g2, g'') ->
+  case splitGen g'' of { (g3, g''') ->
+    Node3 (3 * mSize) (buildItem depth mSize' g1 left) (buildItem depth mSize' g2 mid) (buildItem depth mSize' g3 right)
+      where
+        !mSize' = mSize * 3
+--        unpackSingleton _g (Single (Chunk _ (Seq (Single x)))) = x
+--        unpackSingleton _ _ = error "Parted is not a singleton at the leaf"
+        (left, mid, right) =
+          case divideParted g''' mSize p of { TripleS left' rest g'''' ->
+          case divideParted g'''' mSize rest of { TripleS mid' right' _ ->
+             (left', mid', right') }}}}}
 
 
 -- TODO: choose sample size cutoffs much more carefully. I suspect we'll want
@@ -213,7 +240,9 @@ sampleBuckets g s =
   case uniformListR 15 (0, length s - 1) g of
     (indices, g') ->
       let sample = L.sort (fmap (s `index`) indices)
-      in partitionFour (sample L.!! 3) (sample L.!! 7) (sample L.!! 11) s :*: g'
+      in case sample of
+        _ : _ : _ : p1 : _ : _ : _ : p2 : _ : _ : _ : p3 : _ -> partitionFour p1 p2 p3 s :*: g'
+        _ -> error "Length mismatch"
 
 -- Four ranges and a separate bucket for each splitter's equal keys.
 data BucketLists a = BucketLists ![a] ![a] ![a] ![a] ![a] ![a] ![a]
@@ -221,14 +250,21 @@ data BucketLists a = BucketLists ![a] ![a] ![a] ![a] ![a] ![a] ![a]
 -- TODO: This AI-generated partitioning code isn't very nice, and I'd very much
 -- like to be rid of it. Some ideas:
 --
--- 1. Use arrays instead of lists, and don't convert them to sequences.
+-- 1. Use arrays instead of lists, and don't convert the unsorted ones to sequences.
+--    We don't really get anything from the conversion to sequences, except
+--    more uniformity between the first and subsequent passes. I doubt that's worth
+--    all the allocation.
 --
 -- 2. Use lists as here, but don't convert them to sequences; the issue with
 --    that approach is that is suggests swapping directions back and forth by level,
---    and is awkward if we want to use a "deserialization" approach near the leaves.
+--    and is especially awkward if we want to use a "deserialization" approach near
+--    the leaves.
 --
 -- 3. Switch from a giant tuple to an array-based binary search tree thingy, with
---    the buckets represented by an array of (doubling) arrays.
+--    the buckets represented by an array of (doubling) arrays. It could even be
+--    a pointer-based binary tree of doubling arrays, but that seems to bring in
+--    even more indirection.
+
 
 partitionFour :: Ord a => a -> a -> a -> Seq a -> [Chunk a]
 partitionFour low mid high s =
@@ -257,11 +293,16 @@ partitionFour low mid high s =
 
 -- Refine the bucket containing the cut and keep the others for later cuts.
 divideBuckets :: Ord a => StdGen -> Int -> Parted a -> [Chunk a] -> Parted a -> StrictTriple (Parted a) (Parted a) StdGen
+-- TODO: foldr with a strict function (<<|) is fishy. Should we reverse the order of the output
+-- from partitionFour so we can use a strict left fold instead? That will lead to us counting
+-- down or something, which is annoying, but maybe better. All that said, the performance cost
+-- of this awkwardness is minimal; we're only dealing with seven buckets.
 divideBuckets g 0 before buckets after = TripleS before (foldr (<<|) after buckets) g
 divideBuckets g i before (bucket : buckets) after
   | i < size bucket = divideParted' g i before bucket (foldr (<<|) after buckets)
   | otherwise = divideBuckets g (i - size bucket) (before |>> bucket) buckets after
 divideBuckets _ _ _ [] _ = error "divideBuckets: rank outside the chunk"
+
 
 -- CAUTION: Split should only be used for *data* like Node or Seq, not for
 -- Elem. Otherwise, it will force things illegitimately.
